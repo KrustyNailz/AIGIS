@@ -3,7 +3,7 @@
 **Version:** 1.0.0
 **Date:** October 29, 2026
 **Author:** Russell Lea Renison
-**License:** MIT
+**License:** Apache License 2.0
 
 ---
 

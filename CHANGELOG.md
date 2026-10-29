@@ -7,6 +7,9 @@ Every pull request adds a line under **[Unreleased]**. On release, that section 
 
 ## [Unreleased]
 
+### Changed
+- License changed from MIT to Apache License 2.0 (explicit patent grant with litigation termination); added `NOTICE`.
+
 ## [1.0.0] - 2026-10-29
 
 ### Added

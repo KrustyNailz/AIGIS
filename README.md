@@ -3,7 +3,7 @@
 **An open-source protocol and reference implementation for identifying, registering, and tracking AI agents.**
 
 [![CI](https://github.com/KrustyNailz/AIGIS/actions/workflows/ci.yml/badge.svg)](https://github.com/KrustyNailz/AIGIS/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Java 21](https://img.shields.io/badge/Java-21-orange.svg)](https://adoptium.net/)
 [![Protocol v1.0.0](https://img.shields.io/badge/Protocol-v1.0.0-green.svg)](SPECIFICATION.md)
 
@@ -243,7 +243,8 @@ AIGIS/
 ├── CHANGELOG.md              ← every release and modification, newest first
 ├── CONTRIBUTING.md           ← how to propose changes; PR and protocol-change process
 ├── SECURITY.md               ← how to report vulnerabilities privately
-├── LICENSE                   ← MIT
+├── LICENSE                   ← Apache License 2.0
+├── NOTICE                    ← attribution notice (keep with redistributions)
 ├── pom.xml                   ← build + pinned dependencies
 ├── mvnw, mvnw.cmd, .mvn/     ← Maven wrapper (no Maven install needed)
 ├── src/main/java/io/kymatech/aigis/
@@ -328,9 +329,9 @@ Please **do not** open public issues for vulnerabilities. See [`SECURITY.md`](SE
 
 ## License and Patent Notice
 
-The AIGIS protocol and this reference implementation are released under the **[MIT License](LICENSE)** — free for anyone to use, copy, modify, merge, publish, distribute, sublicense, and sell, provided the copyright notice is retained.
+The AIGIS protocol and this reference implementation are released under the **[Apache License 2.0](LICENSE)** — free for anyone to use, modify, and distribute, commercially or otherwise, provided the license and [`NOTICE`](NOTICE) are retained and modified files are marked as changed.
 
-Related enforcement and governance technologies (outside this repository) are covered by U.S. Provisional Patent Application 63/789,142 and related pending applications, and remain proprietary to the inventor. The MIT License grants full rights to everything in this repository.
+Apache 2.0 includes an explicit patent license: everyone who uses this repository's code receives a royalty-free patent license for it, and that license terminates for anyone who brings a patent lawsuit claiming the code infringes. Related enforcement and governance technologies outside this repository (ICOSA, Betelgeuse, Overwatch) are the subject of pending patent applications and remain proprietary to the inventor; nothing in this repository grants rights to them.
 
 ## Author
 

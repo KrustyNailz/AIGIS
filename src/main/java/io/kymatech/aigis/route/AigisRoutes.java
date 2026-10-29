@@ -77,7 +77,7 @@ public class AigisRoutes implements HttpService {
             Map.entry("protocol", "AI-GIS: Agent Identity Governance & Identification Serialization"),
             Map.entry("codename", "Black Reigns"),
             Map.entry("version", "1.0.0"),
-            Map.entry("license", "MIT License — freely available for global adoption"),
+            Map.entry("license", "Apache License 2.0 — freely available for global adoption"),
             Map.entry("patent", "Continuation-in-part of App. No. 63/789,142"),
             Map.entry("referenceImplementation", "ICOSA Platform by Kymatech, Inc."),
             Map.entry("description", "A deterministic, tamper-evident identity and accountability protocol "

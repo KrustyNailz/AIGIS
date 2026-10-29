@@ -6,7 +6,7 @@ AIGIS is an open-source protocol donated to the AI industry. Contributions are w
 
 - **All changes go through pull requests.** `main` is protected: no direct pushes, no force pushes.
 - Every PR needs: passing CI, a `CHANGELOG.md` entry, a completed PR checklist, and code-owner approval.
-- By contributing, you agree your contributions are licensed under the MIT License.
+- By contributing, you agree your contributions are licensed under the Apache License 2.0 (see Section 5 of the license).
 
 ## How to contribute
 
