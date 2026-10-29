@@ -1,0 +1,22 @@
+name: Protocol change proposal
+description: Propose a change to the AIGIS specification (SPECIFICATION.md)
+labels: [protocol-change]
+body:
+  - type: input
+    id: section
+    attributes: {label: Affected section(s), placeholder: "2.1 Serial Number Format"}
+    validations: {required: true}
+  - type: textarea
+    id: problem
+    attributes: {label: Problem / motivation}
+    validations: {required: true}
+  - type: textarea
+    id: text
+    attributes: {label: Proposed specification text}
+    validations: {required: true}
+  - type: dropdown
+    id: compat
+    attributes:
+      label: Compatibility
+      options: ["Backward compatible (MINOR/PATCH)", "Breaking (MAJOR)"]
+    validations: {required: true}

@@ -1,0 +1,18 @@
+name: Bug report
+description: Something in the reference implementation doesn't work as documented
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes: {label: What happened?, description: Include the request and response if relevant.}
+    validations: {required: true}
+  - type: textarea
+    id: expected
+    attributes: {label: What did you expect?}
+    validations: {required: true}
+  - type: input
+    id: version
+    attributes: {label: AIGIS version or commit, placeholder: v1.0.0}
+  - type: input
+    id: java
+    attributes: {label: Java version and OS, placeholder: "Temurin 21, Ubuntu 24.04"}

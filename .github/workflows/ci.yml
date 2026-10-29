@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Build and test
+        run: ./mvnw -B clean verify
+      - name: Smoke test the runnable jar
+        run: |
+          java -jar target/aigis.jar --port 18097 & PID=$!
+          for i in $(seq 1 30); do curl -sf localhost:18097/health && break; sleep 1; done
+          curl -sf -X POST localhost:18097/api/v1/aigis/register \
+            -H 'Content-Type: application/json' \
+            -d '{"provider":"ci","modelName":"smoke","category":"AGT"}' | grep -q '"serialNumber":"AIGIS-AGT-'
+          kill $PID
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aigis-jar
+          path: target/aigis.jar
+
+  changelog:
+    name: changelog
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require CHANGELOG.md entry
+        if: "!contains(github.event.pull_request.labels.*.name, 'skip-changelog') && github.actor != 'dependabot[bot]'"
+        run: |
+          git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -qx 'CHANGELOG.md' \
+            || { echo "::error::Add an entry under [Unreleased] in CHANGELOG.md (or ask a maintainer for the skip-changelog label)."; exit 1; }
