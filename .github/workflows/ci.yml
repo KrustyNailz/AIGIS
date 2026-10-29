@@ -29,7 +29,7 @@ jobs:
             -H 'Content-Type: application/json' \
             -d '{"provider":"ci","modelName":"smoke","category":"AGT"}' | grep -q '"serialNumber":"AIGIS-AGT-'
           kill $PID
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: aigis-jar
           path: target/aigis.jar
