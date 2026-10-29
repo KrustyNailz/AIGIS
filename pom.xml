@@ -43,7 +43,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
         <!-- Pinned dependency versions — change only via a reviewed PR + CHANGELOG entry -->
-        <helidon.version>4.1.6</helidon.version>
+        <helidon.version>27.0.1</helidon.version>
         <jackson.version>2.18.6</jackson.version>
         <junit.version>5.10.3</junit.version>
 
