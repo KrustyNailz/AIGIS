@@ -132,4 +132,29 @@ class AgentSerializationServiceTest {
         AgentSerialNumber c = restarted.registerAgent("alice", "p", "c", "1", "AGT", "", Map.of());
         assertEquals(3, c.sequenceNumber(), "sequence continues after restart");
     }
+
+    @Test
+    void registryWideCapacityIsEnforced() {
+        AgentSerializationService small = new AgentSerializationService("", null, 100).withCapacity(2, 1, 1);
+        AgentSerialNumber a = small.registerAgent("alice", "p", "a", "1", "AGT", "", Map.of());
+        small.registerAgent("bob", "p", "b", "1", "AGT", "", Map.of());
+        assertThrows(AgentSerializationService.CapacityException.class,
+            () -> small.registerAgent("carol", "p", "c", "1", "AGT", "", Map.of()));
+
+        PrompterIdentity p = small.registerPrompter("alice", "org", "id", "oidc", PrompterIdentity.PrompterType.HUMAN, "");
+        assertThrows(AgentSerializationService.CapacityException.class,
+            () -> small.registerPrompter("alice", "org2", "id", "oidc", PrompterIdentity.PrompterType.HUMAN, ""));
+        assertNotNull(small.createOwnershipRecord("alice", a.serialNumber(), p.prompterHash(), "prov", "act", "", "", null));
+        assertThrows(AgentSerializationService.CapacityException.class,
+            () -> small.createOwnershipRecord("alice", a.serialNumber(), p.prompterHash(), "prov", "act2", "", "", null));
+    }
+
+    @Test
+    void hugeOrNegativePagesAreEmptyNotErrors() {
+        service.registerAgent("p", "m", "1", "AGT", "", Map.of());
+        assertTrue(service.page(Integer.MAX_VALUE, 100).isEmpty());
+        assertTrue(service.page(21_474_837, 100).isEmpty());
+        assertTrue(service.page(-1, 10).isEmpty());
+        assertEquals(1, service.page(0, 100).size());
+    }
 }

@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 
 /**
  * AIGIS REST API: Serialization &amp; Identification Protocol.
@@ -50,6 +51,17 @@ public class AigisRoutes implements HttpService {
         .registerModule(new JavaTimeModule())
         .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
     private static final int MAX_FIELD = 200;
+
+    /**
+     * Allowed characters for anything that can appear in the public registry or in a verified
+     * record: letters, digits, space and a few separators. Rules out markup, control characters,
+     * URLs-with-queries and other content an attacker could plant in a public listing.
+     */
+    private static final Pattern NAME_FIELD = Pattern.compile("^[\\p{L}\\p{N}][\\p{L}\\p{N} ._:/@+()-]{0,99}$");
+    private static final Pattern SPIFFE_ID = Pattern.compile("^spiffe://[A-Za-z0-9._-]{1,100}(/[A-Za-z0-9._-]{1,64}){0,8}$");
+    private static final Pattern TOKEN_FIELD = Pattern.compile("^[A-Za-z0-9._:-]{1,64}$");
+    private static final Pattern HEX = Pattern.compile("^[0-9a-fA-F]{0,128}$");
+    private static final Pattern NO_CONTROL = Pattern.compile("^[^\\p{Cntrl}]{0,200}$");
 
     private final AgentSerializationService service;
     private final String apiKey;
@@ -100,6 +112,8 @@ public class AigisRoutes implements HttpService {
             ? "Enabled: registrations, status changes and ownership records are also appended to an external audit chain"
             : "Not configured");
         body.put("publisher", "KYMA Tech Solutions (kymatech.io)");
+        body.put("architect", "Russell \"Sage\" Renison (Kymatech, Inc.)");
+        body.put("contributors", "Ed Bratt, Claude Code (Anthropic)");
         send(res, 200, body);
     }
 
@@ -181,8 +195,14 @@ public class AigisRoutes implements HttpService {
             send(res, 400, Map.of("error", "provider and modelName are required"));
             return;
         }
-        if (tooLong(provider, modelName, modelVersion, spiffeId)) {
-            send(res, 400, Map.of("error", "Fields must be at most " + MAX_FIELD + " characters"));
+        if (!NAME_FIELD.matcher(provider).matches() || !NAME_FIELD.matcher(modelName).matches()
+            || !NAME_FIELD.matcher(modelVersion).matches()) {
+            send(res, 400, Map.of("error", "provider, modelName and modelVersion may contain letters, digits, "
+                + "spaces and . _ : / @ + ( ) - (up to 100 characters)"));
+            return;
+        }
+        if (!spiffeId.isEmpty() && !SPIFFE_ID.matcher(spiffeId).matches()) {
+            send(res, 400, Map.of("error", "spiffeId must be a spiffe:// URI"));
             return;
         }
         if (!AgentSerializationService.CATEGORIES.contains(category)) {
@@ -197,6 +217,9 @@ public class AigisRoutes implements HttpService {
             send(res, 201, out);
         } catch (AgentSerializationService.QuotaExceededException e) {
             send(res, 429, Map.of("error", e.getMessage()));
+        } catch (AgentSerializationService.CapacityException e) {
+            LOG.warning("[AIGIS] " + e.getMessage());
+            send(res, 503, Map.of("error", e.getMessage()));
         } catch (Exception e) {
             LOG.warning("[AIGIS] Registration failed: " + e.getMessage());
             send(res, 500, Map.of("error", "Registration failed"));
@@ -218,8 +241,14 @@ public class AigisRoutes implements HttpService {
             send(res, 400, Map.of("error", "organizationId is required"));
             return;
         }
-        if (tooLong(orgId, authId, authMethod, spiffeId)) {
-            send(res, 400, Map.of("error", "Fields must be at most " + MAX_FIELD + " characters"));
+        if (!NAME_FIELD.matcher(orgId).matches() || !TOKEN_FIELD.matcher(authMethod).matches()
+            || !NO_CONTROL.matcher(authId).matches()) {
+            send(res, 400, Map.of("error", "organizationId may contain letters, digits, spaces and . _ : / @ + ( ) -; "
+                + "authMethod letters, digits and . _ : -"));
+            return;
+        }
+        if (!spiffeId.isEmpty() && !SPIFFE_ID.matcher(spiffeId).matches()) {
+            send(res, 400, Map.of("error", "spiffeId must be a spiffe:// URI"));
             return;
         }
         PrompterIdentity.PrompterType type;
@@ -237,6 +266,10 @@ public class AigisRoutes implements HttpService {
             ));
         } catch (SecurityException e) {
             send(res, 403, Map.of("error", e.getMessage()));
+        } catch (AgentSerializationService.QuotaExceededException e) {
+            send(res, 429, Map.of("error", e.getMessage()));
+        } catch (AgentSerializationService.CapacityException e) {
+            send(res, 503, Map.of("error", e.getMessage()));
         }
     }
 
@@ -257,12 +290,24 @@ public class AigisRoutes implements HttpService {
             send(res, 400, Map.of("error", "agentSerial, prompterHash, providerId, and actionType are required"));
             return;
         }
-        if (tooLong(providerId, actionType, actionTarget, payloadHash, verdict)) {
-            send(res, 400, Map.of("error", "Fields must be at most " + MAX_FIELD + " characters"));
+        if (!NAME_FIELD.matcher(providerId).matches() || !TOKEN_FIELD.matcher(actionType).matches()
+            || !TOKEN_FIELD.matcher(verdict).matches() || !HEX.matcher(payloadHash).matches()
+            || !NO_CONTROL.matcher(actionTarget).matches()) {
+            send(res, 400, Map.of("error", "Invalid field: actionType and verdict allow letters, digits and . _ : - "
+                + "(up to 64); actionPayloadHash must be hex; no control characters"));
             return;
         }
-        ActionOwnershipRecord record = service.createOwnershipRecord(owner, agentSerial, prompterHash,
-            providerId, actionType, actionTarget, payloadHash, verdict);
+        ActionOwnershipRecord record;
+        try {
+            record = service.createOwnershipRecord(owner, agentSerial, prompterHash,
+                providerId, actionType, actionTarget, payloadHash, verdict);
+        } catch (AgentSerializationService.QuotaExceededException e) {
+            send(res, 429, Map.of("error", e.getMessage()));
+            return;
+        } catch (AgentSerializationService.CapacityException e) {
+            send(res, 503, Map.of("error", e.getMessage()));
+            return;
+        }
         if (record == null) {
             send(res, 403, Map.of("error",
                 "Denied: the agent must be one of your active agents and the prompter one you registered"));
@@ -407,11 +452,6 @@ public class AigisRoutes implements HttpService {
         } catch (Exception e) {
             res.status(500).send("{\"error\":\"JSON serialization failed\"}");
         }
-    }
-
-    private static boolean tooLong(String... values) {
-        for (String v : values) if (v != null && v.length() > MAX_FIELD) return true;
-        return false;
     }
 
     private static int intParam(ServerRequest req, String name, int def) {

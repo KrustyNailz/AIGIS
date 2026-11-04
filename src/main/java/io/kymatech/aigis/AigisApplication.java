@@ -22,6 +22,9 @@ import java.util.logging.Logger;
  *   AIGIS_API_KEY               key required for write endpoints (unset = open, local dev only)
  *   AIGIS_DATA_DIR              registry journal directory (default ./data; "none" = in memory)
  *   AIGIS_MAX_AGENTS_PER_OWNER  registrations allowed per owner (default 10000)
+ *   AIGIS_MAX_TOTAL_AGENTS / AIGIS_MAX_TOTAL_PROMPTERS / AIGIS_MAX_TOTAL_RECORDS
+ *                               registry-wide ceilings; size them to the heap (defaults 500k / 100k / 500k,
+ *                               roughly 1 GB of heap when full)
  *   AUDIT_CHAIN_URL             optional audit chain base URL; events are POSTed to {url}/record
  *
  * Published by KYMA Tech Solutions (kymatech.io) under the Apache License 2.0.
@@ -50,7 +53,10 @@ public class AigisApplication {
         AgentSerializationService service = new AgentSerializationService(
             auditChainUrl,
             "none".equalsIgnoreCase(dataDir) ? null : Path.of(dataDir),
-            maxPerOwner.isBlank() ? 10_000 : Integer.parseInt(maxPerOwner));
+            maxPerOwner.isBlank() ? 10_000 : Integer.parseInt(maxPerOwner))
+            .withCapacity(longEnv("AIGIS_MAX_TOTAL_AGENTS", 500_000),
+                longEnv("AIGIS_MAX_TOTAL_PROMPTERS", 100_000),
+                longEnv("AIGIS_MAX_TOTAL_RECORDS", 500_000));
         String mode = auditChainUrl.isBlank() ? "STANDALONE" : "INTEGRATED";
 
         // Open CORS: the protocol is public; writes still require the API key.
@@ -95,6 +101,11 @@ public class AigisApplication {
             LOG.info("[AIGIS] shutting down");
             server.stop();
         }));
+    }
+
+    private static long longEnv(String name, long def) {
+        String v = env(name);
+        return v.isBlank() ? def : Long.parseLong(v);
     }
 
     private static String env(String name) {

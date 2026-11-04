@@ -54,7 +54,18 @@ public class AgentSerializationService {
         }
     }
 
+    /** Thrown when the registry as a whole is at capacity; the API answers 503 instead of running out of memory. */
+    public static class CapacityException extends RuntimeException {
+        public CapacityException(String what) {
+            super("The registry is at capacity for " + what + "; try again later");
+        }
+    }
+
     public enum Change { OK, NOT_FOUND, FORBIDDEN }
+
+    /** Per-owner ceilings on prompters and ownership records (agents use maxAgentsPerOwner). */
+    public static final int MAX_PROMPTERS_PER_OWNER = 1_000;
+    public static final int MAX_RECORDS_PER_OWNER = 100_000;
 
     private static final ObjectMapper JSON = new ObjectMapper()
         .registerModule(new JavaTimeModule())
@@ -70,6 +81,11 @@ public class AgentSerializationService {
 
     private final Map<String, PrompterIdentity> prompters = new ConcurrentHashMap<>();
     private final Map<String, String> prompterOwners = new ConcurrentHashMap<>();
+    private final Map<String, AtomicLong> ownerPrompterCounts = new ConcurrentHashMap<>();
+    private final Map<String, AtomicLong> ownerRecordCounts = new ConcurrentHashMap<>();
+    private long maxTotalAgents = Long.MAX_VALUE;
+    private long maxTotalPrompters = Long.MAX_VALUE;
+    private long maxTotalRecords = Long.MAX_VALUE;
 
     private final Map<String, ActionOwnershipRecord> ownershipRecords = new ConcurrentHashMap<>();
     private final Map<String, List<String>> recordsByAgent = new ConcurrentHashMap<>();
@@ -103,6 +119,14 @@ public class AgentSerializationService {
         if (journal != null) openJournal(dataDir);
     }
 
+    /** Registry-wide ceilings, sized to the heap so a flood of registrations cannot crash the service. */
+    public AgentSerializationService withCapacity(long agents, long prompters, long records) {
+        this.maxTotalAgents = agents;
+        this.maxTotalPrompters = prompters;
+        this.maxTotalRecords = records;
+        return this;
+    }
+
     public boolean isPersistent() { return journal != null; }
 
     public boolean isAuditChainEnabled() { return !auditChainUrl.isBlank(); }
@@ -124,6 +148,7 @@ public class AgentSerializationService {
         if (!ADMIN_OWNER.equals(owner) && held.get() >= maxAgentsPerOwner) {
             throw new QuotaExceededException(maxAgentsPerOwner);
         }
+        if (registrationOrder.size() >= maxTotalAgents) throw new CapacityException("agents");
 
         Instant now = Instant.now();
         String fullHash = AgentSerialNumber.computeIdentityHash(provider, modelName, modelVersion, now);
@@ -203,13 +228,22 @@ public class AgentSerializationService {
             throw new SecurityException("Prompter is registered under another API key");
         }
         PrompterIdentity existing = prompters.get(hash);
+        if (existing == null) {
+            if (prompters.size() >= maxTotalPrompters) throw new CapacityException("prompters");
+            if (!ADMIN_OWNER.equals(owner)
+                && ownerPrompterCounts.computeIfAbsent(owner, o -> new AtomicLong()).get() >= MAX_PROMPTERS_PER_OWNER) {
+                throw new QuotaExceededException(MAX_PROMPTERS_PER_OWNER);
+            }
+        }
         Instant firstSeen = existing != null ? existing.firstSeen() : Instant.now();
         long count = existing != null ? existing.actionCount() : 0;
 
         PrompterIdentity id = new PrompterIdentity(
             hash, orgId, authMethod, spiffeId, firstSeen, Instant.now(), count, type, Map.of());
         prompters.put(hash, id);
-        prompterOwners.putIfAbsent(hash, owner);
+        if (prompterOwners.putIfAbsent(hash, owner) == null) {
+            ownerPrompterCounts.computeIfAbsent(owner, o -> new AtomicLong()).incrementAndGet();
+        }
         journal("prompter", Map.of("owner", prompterOwners.get(hash), "v", id));
         return id;
     }
@@ -238,6 +272,12 @@ public class AgentSerializationService {
             return null;
         }
 
+        if (ownershipRecords.size() >= maxTotalRecords) throw new CapacityException("ownership records");
+        if (!ADMIN_OWNER.equals(owner)
+            && ownerRecordCounts.computeIfAbsent(owner, o -> new AtomicLong()).get() >= MAX_RECORDS_PER_OWNER) {
+            throw new QuotaExceededException(MAX_RECORDS_PER_OWNER);
+        }
+
         Instant now = Instant.now();
         ActionOwnershipRecord record = new ActionOwnershipRecord(
             null, agentSerial, agent.fullHash(), prompterHash, providerId,
@@ -245,7 +285,8 @@ public class AgentSerializationService {
             "", verdict != null && !verdict.isBlank() ? verdict : "PENDING", Map.of());
 
         indexRecord(record);
-        journal("aor", Map.of("v", record));
+        ownerRecordCounts.computeIfAbsent(owner, o -> new AtomicLong()).incrementAndGet();
+        journal("aor", Map.of("owner", owner, "v", record));
         sealToAuditChain("ACTION_OWNERSHIP", agentSerial, record.toAuditPayload());
         return record;
     }
@@ -285,9 +326,12 @@ public class AgentSerializationService {
 
     /** One page of the registry, newest registration first. */
     public List<AgentSerialNumber> page(int page, int size) {
-        List<AgentSerialNumber> out = new ArrayList<>(size);
+        List<AgentSerialNumber> out = new ArrayList<>(Math.max(0, Math.min(size, 100)));
+        if (page < 0 || size <= 0) return out;
         synchronized (registrationOrder) {
-            int end = registrationOrder.size() - 1 - page * size;
+            long skip = (long) page * size; // long: a huge page number must not overflow into a valid index
+            if (skip >= registrationOrder.size()) return out;
+            int end = (int) (registrationOrder.size() - 1 - skip);
             for (int i = end; i >= 0 && i > end - size; i--) {
                 AgentSerialNumber sn = serialsByNumber.get(registrationOrder.get(i));
                 if (sn != null) out.add(sn);
@@ -402,9 +446,17 @@ public class AgentSerializationService {
             case "prompter" -> {
                 PrompterIdentity p = JSON.treeToValue(n.get("v"), PrompterIdentity.class);
                 prompters.put(p.prompterHash(), p);
-                prompterOwners.putIfAbsent(p.prompterHash(), n.path("owner").asText());
+                String owner = n.path("owner").asText();
+                if (prompterOwners.putIfAbsent(p.prompterHash(), owner) == null) {
+                    ownerPrompterCounts.computeIfAbsent(owner, o -> new AtomicLong()).incrementAndGet();
+                }
             }
-            case "aor" -> indexRecord(JSON.treeToValue(n.get("v"), ActionOwnershipRecord.class));
+            case "aor" -> {
+                indexRecord(JSON.treeToValue(n.get("v"), ActionOwnershipRecord.class));
+                if (n.hasNonNull("owner")) {
+                    ownerRecordCounts.computeIfAbsent(n.get("owner").asText(), o -> new AtomicLong()).incrementAndGet();
+                }
+            }
             default -> LOG.warning("[AIGIS] Unknown journal entry type: " + n.path("t").asText());
         }
     }

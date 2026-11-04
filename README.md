@@ -188,6 +188,7 @@ Every agent and prompter belongs to the caller that registered it. "Owner" endpo
 | Bind address | `server.host` in `application.yaml` | `0.0.0.0` |
 | Registry storage | `AIGIS_DATA_DIR` env (`none` = in memory only) | `./data` (`data/registry.jsonl`) |
 | Registrations per owner | `AIGIS_MAX_AGENTS_PER_OWNER` env | `10000` |
+| Registry-wide limits | `AIGIS_MAX_TOTAL_AGENTS` / `AIGIS_MAX_TOTAL_PROMPTERS` / `AIGIS_MAX_TOTAL_RECORDS` env (503 when reached; size to your heap) | `500000` / `100000` / `500000` (≈1 GB heap) |
 | External audit chain | `AUDIT_CHAIN_URL` env (events are POSTed to `<url>/record`) | unset = standalone |
 
 > **Always set `AIGIS_API_KEY` on any server reachable by others.** Without it, anyone can register agents, and anyone can act as administrator.
@@ -364,7 +365,9 @@ Apache 2.0 includes an explicit patent license: everyone who uses this repositor
 
 ## Author
 
-**Russell Lea Renison**
+**Architect & Inventor:** Russell "Sage" Renison (Kymatech, Inc.)
+**Contributors:** Ed Bratt, Claude Code (Anthropic)
+
 KYMA Tech Solutions — Costa Mesa, CA
 [kymatech.io](https://kymatech.io) · partners@kymatech.io
 

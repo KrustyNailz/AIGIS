@@ -13,7 +13,15 @@ Every pull request adds a line under **[Unreleased]**. On release, that section 
   revoke, attach ownership records to, or read the history of its agents. Gateways can name the user in `X-AIGIS-Owner`.
 - Per-owner registration limit (`AIGIS_MAX_AGENTS_PER_OWNER`, default 10,000; 429 when reached).
 - `GET /registry` paging (`page`, `size` 1–100); `/stats` is now constant-time at any registry size.
-- Tests for ownership, quotas, paging and restart recovery (9 tests).
+- Tests for ownership, quotas, paging, restart recovery, capacity and paging overflow (11 tests).
+- Registry-wide capacity limits (`AIGIS_MAX_TOTAL_AGENTS`, `_PROMPTERS`, `_RECORDS`; 503 when full) and
+  per-owner limits on prompters (1,000) and ownership records (100,000).
+
+### Security
+- Public-facing fields (provider, model, version, organization, action type, verdict) accept only letters,
+  digits, spaces and `. _ : / @ + ( ) -`; `spiffeId` must be a `spiffe://` URI; payload hashes must be hex.
+  Prevents markup, control characters and spam links from appearing in the public registry.
+- A very large `page` value no longer overflows into an error.
 
 ### Changed
 - License changed from MIT to Apache License 2.0 (explicit patent grant with litigation termination); added `NOTICE`.
