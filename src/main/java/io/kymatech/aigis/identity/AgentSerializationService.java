@@ -23,7 +23,7 @@ import java.util.logging.Logger;
  *
  * AI-GIS: Agent Identity Governance & Identification Serialization
  * Codename: Black Reigns
- * Patent Pending: continuation-in-part of App. No. 63/789,142
+ * Patent Pending: U.S. Provisional App. No. 64/186,696
  */
 public class AgentSerializationService {
     private static final Logger LOG = Logger.getLogger(AgentSerializationService.class.getName());

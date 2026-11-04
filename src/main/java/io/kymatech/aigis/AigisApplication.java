@@ -26,7 +26,7 @@ import java.util.logging.Logger;
  *                governance layer. AORs are sealed into the production chain.
  *
  * Codename: Black Reigns
- * Patent Pending: continuation-in-part of App. No. 63/789,142
+ * Patent Pending: U.S. Provisional App. No. 64/186,696
  * Open Source — the AI-GIS serialization protocol is offered freely for global adoption.
  * Reference Implementation by Kymatech, Inc.
  *
@@ -93,7 +93,7 @@ public class AigisApplication {
                 + "\"protocol\":\"/api/v1/aigis/protocol\","
                 + "\"registry\":\"/api/v1/aigis/registry\","
                 + "\"openSource\":true,"
-                + "\"patent\":\"Continuation-in-part of App. No. 63/789,142\","
+                + "\"patent\":\"U.S. Provisional App. No. 64/186,696\","
                 + "\"referenceImplementation\":\"ICOSA Platform by Kymatech, Inc.\"}"));
 
         WebServer server = WebServer.builder()

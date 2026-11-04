@@ -26,7 +26,7 @@ import java.util.Map;
  *
  * AI-GIS: Agent Identity Governance & Identification Serialization
  * Codename: Black Reigns
- * Patent Pending: continuation-in-part of App. No. 63/789,142
+ * Patent Pending: U.S. Provisional App. No. 64/186,696
  * Open Source Protocol — freely available for global adoption.
  */
 public record AgentSerialNumber(
