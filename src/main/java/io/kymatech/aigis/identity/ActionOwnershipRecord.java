@@ -8,18 +8,16 @@ import java.util.HexFormat;
 import java.util.Map;
 
 /**
- * AI-GIS Action Ownership Record (AOR) — the triple-bind that links every agentic
+ * AIGIS Action Ownership Record (AOR) — the triple-bind that links every agentic
  * action to exactly three accountable parties:
  *
  *   1. AGENT    — the model/agent that performed the action (AgentSerialNumber)
  *   2. PROMPTER — the human/system that initiated it (PrompterIdentity)
  *   3. PROVIDER — the organization hosting/serving the agent
  *
- * No AOR = no token = no action. The audit chain proves WHO did WHAT via WHICH
- * agent, and that proof is tamper-evident (Ed25519 signed, Merkle anchored).
- *
- * AI-GIS: Agent Identity Governance & Identification Serialization
- * Codename: Black Reigns
+ * The record shows WHO did WHAT via WHICH agent, and it is tamper-evident: its SHA-256
+ * record hash changes if any field changes. An enforcement layer (for example ICOSA
+ * Betelgeuse) can refuse any action that has no ownership record.
  */
 public record ActionOwnershipRecord(
         String recordHash,

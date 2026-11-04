@@ -8,7 +8,7 @@ import java.util.HexFormat;
 import java.util.Map;
 
 /**
- * AI-GIS Prompter Identity — the human or system that initiates an agentic action.
+ * AIGIS Prompter Identity — the human or system that initiates an agentic action.
  *
  * The identity hash is a one-way SHA-256 of verifiable credentials. It cannot be
  * reversed to reveal PII, but the prompter can prove ownership by reproducing the
@@ -16,9 +16,6 @@ import java.util.Map;
  * map the hash back to the individual.
  *
  * Solves: "who told the agent to do that?"
- *
- * AI-GIS: Agent Identity Governance & Identification Serialization
- * Codename: Black Reigns
  */
 public record PrompterIdentity(
         String prompterHash,

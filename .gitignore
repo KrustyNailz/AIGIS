@@ -6,3 +6,6 @@ target/
 .vscode/
 .DS_Store
 .env
+
+# Local registry journal written by the running server
+data/

@@ -8,7 +8,7 @@ import java.util.HexFormat;
 import java.util.Map;
 
 /**
- * AI-GIS Agent Serial Number — a globally unique, deterministic, tamper-evident identifier
+ * AIGIS Agent Serial Number — a globally unique, deterministic, tamper-evident identifier
  * assigned to every AI model and agent encountered by the protocol.
  *
  * The serial number is a SHA-256 hash of the canonical identity tuple:
@@ -23,11 +23,6 @@ import java.util.Map;
  *   AGT — Autonomous agent built on a model
  *   SYS — Multi-agent system or orchestrator
  *   EMB — Embedded model in a product/device
- *
- * AI-GIS: Agent Identity Governance & Identification Serialization
- * Codename: Black Reigns
- * Patent Pending: U.S. Provisional App. No. 64/186,696
- * Open Source Protocol — freely available for global adoption.
  */
 public record AgentSerialNumber(
         String serialNumber,

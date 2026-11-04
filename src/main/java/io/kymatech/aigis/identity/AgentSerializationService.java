@@ -1,10 +1,22 @@
 package io.kymatech.aigis.identity;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+
+import java.io.BufferedWriter;
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.time.Duration;
 import java.time.Instant;
@@ -14,58 +26,121 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Logger;
 
 /**
- * AI-GIS Agent Serialization Service — the central registry that assigns, tracks, and
- * enforces unique identity for every AI model and agent.
+ * AIGIS registry: assigns permanent serial numbers to AI models and agents, records which
+ * prompter and provider own each action, and answers public lookups.
  *
- * Standalone: runs independently with zero ICOSA platform dependencies.
- * Integrated: when connected to an ICOSA deployment, AORs are sealed into the
- * Rigel audit chain and tokens are gated by Betelgeuse policy enforcement.
+ * Every registration belongs to an owner (the API key that created it). Only that owner can
+ * suspend, revoke, attach actions to, or read the action history of its agents.
  *
- * AI-GIS: Agent Identity Governance & Identification Serialization
- * Codename: Black Reigns
- * Patent Pending: U.S. Provisional App. No. 64/186,696
+ * Persistence: when a data directory is given, every change is appended to
+ * {@code registry.jsonl} and replayed on startup, so the registry survives restarts.
+ * Without one, the registry is in memory only (tests, quick experiments).
+ *
+ * Optional audit chain: when {@code auditChainUrl} is set (e.g. an ICOSA deployment's
+ * {@code /api/v1/audit}), each registration, status change and ownership record is also
+ * appended to that chain via {@code POST {auditChainUrl}/record}.
  */
 public class AgentSerializationService {
     private static final Logger LOG = Logger.getLogger(AgentSerializationService.class.getName());
 
-    private final Map<String, AgentSerialNumber> serialsByHash = new ConcurrentHashMap<>();
-    private final Map<String, AgentSerialNumber> serialsByNumber = new ConcurrentHashMap<>();
-    private final Map<String, PrompterIdentity> prompters = new ConcurrentHashMap<>();
-    private final Map<String, ActionOwnershipRecord> ownershipRecords = new ConcurrentHashMap<>();
-    private final AtomicLong modelSeq = new AtomicLong(0);
-    private final AtomicLong agentSeq = new AtomicLong(0);
-    private final AtomicLong systemSeq = new AtomicLong(0);
-    private final AtomicLong embeddedSeq = new AtomicLong(0);
+    public static final Set<String> CATEGORIES = Set.of("MDL", "AGT", "SYS", "EMB");
+    /** Owner used when the API is called with the service key and no per-user owner. */
+    public static final String ADMIN_OWNER = "admin";
 
-    private final String auditChainUrl;
-    private final HttpClient http;
-
-    public AgentSerializationService(String auditChainUrl) {
-        this.auditChainUrl = auditChainUrl;
-        this.http = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(5))
-            .build();
+    /** Thrown when an owner already holds the maximum number of serials. */
+    public static class QuotaExceededException extends RuntimeException {
+        public QuotaExceededException(int limit) {
+            super("Registration limit reached (" + limit + " agents per API key)");
+        }
     }
 
+    public enum Change { OK, NOT_FOUND, FORBIDDEN }
+
+    private static final ObjectMapper JSON = new ObjectMapper()
+        .registerModule(new JavaTimeModule())
+        .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+        .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES); // e.g. "active" from isActive()
+
+    private final Map<String, AgentSerialNumber> serialsByHash = new ConcurrentHashMap<>();
+    private final Map<String, AgentSerialNumber> serialsByNumber = new ConcurrentHashMap<>();
+    private final Map<String, String> agentOwners = new ConcurrentHashMap<>();
+    private final Map<String, AtomicLong> ownerCounts = new ConcurrentHashMap<>();
+    /** Serials in registration order, for newest-first paging without sorting the registry. */
+    private final List<String> registrationOrder = Collections.synchronizedList(new ArrayList<>());
+
+    private final Map<String, PrompterIdentity> prompters = new ConcurrentHashMap<>();
+    private final Map<String, String> prompterOwners = new ConcurrentHashMap<>();
+
+    private final Map<String, ActionOwnershipRecord> ownershipRecords = new ConcurrentHashMap<>();
+    private final Map<String, List<String>> recordsByAgent = new ConcurrentHashMap<>();
+    private final Map<String, List<String>> recordsByPrompter = new ConcurrentHashMap<>();
+
+    private final Map<String, AtomicLong> sequences = new ConcurrentHashMap<>();
+    private final Map<AgentSerialNumber.SerializationStatus, AtomicLong> statusCounts =
+        new EnumMap<>(AgentSerialNumber.SerializationStatus.class);
+
+    private final String auditChainUrl;
+    private final int maxAgentsPerOwner;
+    private final Path journal;
+    private final HttpClient http;
+    private BufferedWriter journalWriter;
+    private boolean replaying;
+
+    /** In-memory registry with no audit chain and no quota (tests, experiments). */
+    public AgentSerializationService(String auditChainUrl) {
+        this(auditChainUrl, null, Integer.MAX_VALUE);
+    }
+
+    public AgentSerializationService(String auditChainUrl, Path dataDir, int maxAgentsPerOwner) {
+        this.auditChainUrl = auditChainUrl == null ? "" : auditChainUrl.replaceAll("/+$", "");
+        this.maxAgentsPerOwner = maxAgentsPerOwner;
+        this.journal = dataDir == null ? null : dataDir.resolve("registry.jsonl");
+        for (AgentSerialNumber.SerializationStatus s : AgentSerialNumber.SerializationStatus.values()) {
+            statusCounts.put(s, new AtomicLong());
+        }
+        for (String c : CATEGORIES) sequences.put(c, new AtomicLong());
+        this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
+        if (journal != null) openJournal(dataDir);
+    }
+
+    public boolean isPersistent() { return journal != null; }
+
+    public boolean isAuditChainEnabled() { return !auditChainUrl.isBlank(); }
+
+    // ── Agents ───────────────────────────────────────────────────
+
     public AgentSerialNumber registerAgent(String provider, String modelName,
-                                            String modelVersion, String category,
-                                            String spiffeId, Map<String, String> metadata) {
+                                           String modelVersion, String category,
+                                           String spiffeId, Map<String, String> metadata) {
+        return registerAgent(ADMIN_OWNER, provider, modelName, modelVersion, category, spiffeId, metadata);
+    }
+
+    public synchronized AgentSerialNumber registerAgent(String owner, String provider, String modelName,
+                                                        String modelVersion, String category,
+                                                        String spiffeId, Map<String, String> metadata) {
+        String cat = category == null ? "" : category.trim().toUpperCase();
+        if (!CATEGORIES.contains(cat)) throw new IllegalArgumentException("category must be one of " + CATEGORIES);
+        AtomicLong held = ownerCounts.computeIfAbsent(owner, o -> new AtomicLong());
+        if (!ADMIN_OWNER.equals(owner) && held.get() >= maxAgentsPerOwner) {
+            throw new QuotaExceededException(maxAgentsPerOwner);
+        }
+
         Instant now = Instant.now();
         String fullHash = AgentSerialNumber.computeIdentityHash(provider, modelName, modelVersion, now);
-        long seq = nextSequence(category);
-        String serial = AgentSerialNumber.formatSerial(category, fullHash, seq);
+        long seq = sequences.get(cat).incrementAndGet();
+        String serial = AgentSerialNumber.formatSerial(cat, fullHash, seq);
 
         AgentSerialNumber sn = new AgentSerialNumber(
-            serial, fullHash, category, provider, modelName, modelVersion,
+            serial, fullHash, cat, provider, modelName, modelVersion,
             spiffeId, now, now, seq,
             AgentSerialNumber.SerializationStatus.ACTIVE,
             metadata != null ? metadata : Map.of());
 
-        serialsByHash.put(fullHash, sn);
-        serialsByNumber.put(serial, sn);
-        sealToAuditChain("AGENT_REGISTRATION", sn.toAuditPayload());
+        indexAgent(sn, owner);
+        journal("agent", Map.of("owner", owner, "v", sn));
+        sealToAuditChain("AGENT_REGISTRATION", serial, sn.toAuditPayload());
 
-        LOG.info("[AI-GIS] Registered " + serial + " | provider=" + provider + " | model=" + modelName);
+        LOG.info("[AIGIS] Registered " + serial + " | provider=" + provider + " | model=" + modelName);
         return sn;
     }
 
@@ -77,11 +152,56 @@ public class AgentSerializationService {
         return Optional.ofNullable(serialsByHash.get(hash));
     }
 
-    public PrompterIdentity registerPrompter(String orgId, String authIdentity,
-                                              String authMethod,
-                                              PrompterIdentity.PrompterType type,
-                                              String spiffeId) {
+    /** True when {@code owner} registered {@code serial}, or is the service administrator. */
+    public boolean isOwner(String serial, String owner) {
+        return ADMIN_OWNER.equals(owner) || Objects.equals(agentOwners.get(serial), owner);
+    }
+
+    public boolean suspendAgent(String serial) {
+        return suspendAgent(serial, ADMIN_OWNER) == Change.OK;
+    }
+
+    public boolean revokeAgent(String serial) {
+        return revokeAgent(serial, ADMIN_OWNER) == Change.OK;
+    }
+
+    public Change suspendAgent(String serial, String owner) {
+        return changeStatus(serial, owner, AgentSerialNumber.SerializationStatus.SUSPENDED, "AGENT_SUSPENDED");
+    }
+
+    public Change revokeAgent(String serial, String owner) {
+        return changeStatus(serial, owner, AgentSerialNumber.SerializationStatus.REVOKED, "AGENT_REVOKED");
+    }
+
+    private synchronized Change changeStatus(String serial, String owner,
+                                             AgentSerialNumber.SerializationStatus status, String event) {
+        AgentSerialNumber existing = serialsByNumber.get(serial);
+        if (existing == null) return Change.NOT_FOUND;
+        if (!isOwner(serial, owner)) return Change.FORBIDDEN;
+        if (existing.status() == AgentSerialNumber.SerializationStatus.REVOKED) return Change.OK; // permanent
+        Instant at = Instant.now();
+        applyStatus(existing, status, at);
+        journal("status", Map.of("serial", serial, "status", status.name(), "at", at.toString()));
+        sealToAuditChain(event, serial, Map.of("serialNumber", serial, "at", at.toString()));
+        LOG.info("[AIGIS] " + status + " " + serial);
+        return Change.OK;
+    }
+
+    // ── Prompters and ownership records ──────────────────────────
+
+    public PrompterIdentity registerPrompter(String orgId, String authIdentity, String authMethod,
+                                             PrompterIdentity.PrompterType type, String spiffeId) {
+        return registerPrompter(ADMIN_OWNER, orgId, authIdentity, authMethod, type, spiffeId);
+    }
+
+    public synchronized PrompterIdentity registerPrompter(String owner, String orgId, String authIdentity,
+                                                          String authMethod, PrompterIdentity.PrompterType type,
+                                                          String spiffeId) {
         String hash = PrompterIdentity.computePrompterHash(orgId, authIdentity, authMethod);
+        String existingOwner = prompterOwners.get(hash);
+        if (existingOwner != null && !existingOwner.equals(owner) && !ADMIN_OWNER.equals(owner)) {
+            throw new SecurityException("Prompter is registered under another API key");
+        }
         PrompterIdentity existing = prompters.get(hash);
         Instant firstSeen = existing != null ? existing.firstSeen() : Instant.now();
         long count = existing != null ? existing.actionCount() : 0;
@@ -89,84 +209,45 @@ public class AgentSerializationService {
         PrompterIdentity id = new PrompterIdentity(
             hash, orgId, authMethod, spiffeId, firstSeen, Instant.now(), count, type, Map.of());
         prompters.put(hash, id);
+        prompterOwners.putIfAbsent(hash, owner);
+        journal("prompter", Map.of("owner", prompterOwners.get(hash), "v", id));
         return id;
     }
 
     public ActionOwnershipRecord createOwnershipRecord(String agentSerial, String prompterHash,
-                                                        String providerId, String actionType,
-                                                        String actionTarget, String payloadHash,
-                                                        String verdict) {
-        Optional<AgentSerialNumber> agent = lookupBySerial(agentSerial);
-        if (agent.isEmpty() || !agent.get().isActive()) {
-            LOG.warning("[AI-GIS] DENIED — agent not found/inactive: " + agentSerial);
+                                                       String providerId, String actionType,
+                                                       String actionTarget, String payloadHash,
+                                                       String verdict) {
+        return createOwnershipRecord(ADMIN_OWNER, agentSerial, prompterHash, providerId,
+            actionType, actionTarget, payloadHash, verdict);
+    }
+
+    /** Returns null when the agent is unknown, inactive or not the caller's, or the prompter is not the caller's. */
+    public synchronized ActionOwnershipRecord createOwnershipRecord(String owner, String agentSerial,
+                                                                    String prompterHash, String providerId,
+                                                                    String actionType, String actionTarget,
+                                                                    String payloadHash, String verdict) {
+        AgentSerialNumber agent = serialsByNumber.get(agentSerial);
+        if (agent == null || !agent.isActive() || !isOwner(agentSerial, owner)) {
+            LOG.fine("[AIGIS] DENIED: agent not found, inactive or not owned: " + agentSerial);
             return null;
         }
-        if (!prompters.containsKey(prompterHash)) {
-            LOG.warning("[AI-GIS] DENIED — prompter not registered: " + prompterHash);
+        if (!prompters.containsKey(prompterHash)
+            || !(ADMIN_OWNER.equals(owner) || owner.equals(prompterOwners.get(prompterHash)))) {
+            LOG.fine("[AIGIS] DENIED: prompter not registered by caller: " + prompterHash);
             return null;
         }
 
         Instant now = Instant.now();
         ActionOwnershipRecord record = new ActionOwnershipRecord(
-            null, agentSerial, agent.get().fullHash(), prompterHash, providerId,
+            null, agentSerial, agent.fullHash(), prompterHash, providerId,
             actionType, actionTarget, payloadHash, "", now, now.plusSeconds(5),
-            "", verdict != null ? verdict : "PENDING", Map.of());
+            "", verdict != null && !verdict.isBlank() ? verdict : "PENDING", Map.of());
 
-        ownershipRecords.put(record.recordHash(), record);
-        sealToAuditChain("ACTION_OWNERSHIP", record.toAuditPayload());
-
-        // Update prompter action count
-        PrompterIdentity p = prompters.get(prompterHash);
-        if (p != null) {
-            prompters.put(prompterHash, new PrompterIdentity(
-                p.prompterHash(), p.organizationId(), p.authenticationType(),
-                p.spiffeId(), p.firstSeen(), now, p.actionCount() + 1,
-                p.type(), p.metadata()));
-        }
-
-        // Update agent last-seen
-        AgentSerialNumber a = agent.get();
-        AgentSerialNumber updated = new AgentSerialNumber(
-            a.serialNumber(), a.fullHash(), a.category(), a.provider(),
-            a.modelName(), a.modelVersion(), a.spiffeId(), a.firstSeen(),
-            now, a.sequenceNumber(), a.status(), a.metadata());
-        serialsByHash.put(a.fullHash(), updated);
-        serialsByNumber.put(a.serialNumber(), updated);
-
-        LOG.info("[AI-GIS] AOR sealed | agent=" + agentSerial + " | action=" + actionType);
+        indexRecord(record);
+        journal("aor", Map.of("v", record));
+        sealToAuditChain("ACTION_OWNERSHIP", agentSerial, record.toAuditPayload());
         return record;
-    }
-
-    public boolean suspendAgent(String serial) {
-        AgentSerialNumber existing = serialsByNumber.get(serial);
-        if (existing == null) return false;
-        AgentSerialNumber suspended = new AgentSerialNumber(
-            existing.serialNumber(), existing.fullHash(), existing.category(),
-            existing.provider(), existing.modelName(), existing.modelVersion(),
-            existing.spiffeId(), existing.firstSeen(), Instant.now(),
-            existing.sequenceNumber(), AgentSerialNumber.SerializationStatus.SUSPENDED,
-            existing.metadata());
-        serialsByNumber.put(serial, suspended);
-        serialsByHash.put(existing.fullHash(), suspended);
-        sealToAuditChain("AGENT_SUSPENDED", Map.of("serialNumber", serial, "at", Instant.now().toString()));
-        LOG.info("[AI-GIS] SUSPENDED " + serial);
-        return true;
-    }
-
-    public boolean revokeAgent(String serial) {
-        AgentSerialNumber existing = serialsByNumber.get(serial);
-        if (existing == null) return false;
-        AgentSerialNumber revoked = new AgentSerialNumber(
-            existing.serialNumber(), existing.fullHash(), existing.category(),
-            existing.provider(), existing.modelName(), existing.modelVersion(),
-            existing.spiffeId(), existing.firstSeen(), Instant.now(),
-            existing.sequenceNumber(), AgentSerialNumber.SerializationStatus.REVOKED,
-            existing.metadata());
-        serialsByNumber.put(serial, revoked);
-        serialsByHash.put(existing.fullHash(), revoked);
-        sealToAuditChain("AGENT_REVOKED", Map.of("serialNumber", serial, "at", Instant.now().toString()));
-        LOG.info("[AI-GIS] REVOKED " + serial);
-        return true;
     }
 
     public boolean verifyOwnershipRecord(String recordHash) {
@@ -174,67 +255,196 @@ public class AgentSerializationService {
         return r != null && r.verifyIntegrity();
     }
 
+    public Optional<ActionOwnershipRecord> getOwnershipRecord(String recordHash) {
+        return Optional.ofNullable(ownershipRecords.get(recordHash));
+    }
+
+    public boolean isPrompterOwner(String prompterHash, String owner) {
+        return ADMIN_OWNER.equals(owner) || Objects.equals(prompterOwners.get(prompterHash), owner);
+    }
+
     public List<ActionOwnershipRecord> getAgentHistory(String serial) {
-        return ownershipRecords.values().stream()
-            .filter(r -> r.agentSerial().equals(serial))
-            .sorted(Comparator.comparing(ActionOwnershipRecord::timestamp).reversed())
-            .toList();
+        return history(recordsByAgent.get(serial));
     }
 
     public List<ActionOwnershipRecord> getPrompterHistory(String hash) {
-        return ownershipRecords.values().stream()
-            .filter(r -> r.prompterHash().equals(hash))
-            .sorted(Comparator.comparing(ActionOwnershipRecord::timestamp).reversed())
-            .toList();
+        return history(recordsByPrompter.get(hash));
     }
 
+    private List<ActionOwnershipRecord> history(List<String> hashes) {
+        if (hashes == null) return List.of();
+        List<String> copy;
+        synchronized (hashes) { copy = new ArrayList<>(hashes); }
+        Collections.reverse(copy); // newest first
+        return copy.stream().map(ownershipRecords::get).filter(Objects::nonNull).toList();
+    }
+
+    // ── Registry views ───────────────────────────────────────────
+
+    public int totalRegistered() { return registrationOrder.size(); }
+
+    /** One page of the registry, newest registration first. */
+    public List<AgentSerialNumber> page(int page, int size) {
+        List<AgentSerialNumber> out = new ArrayList<>(size);
+        synchronized (registrationOrder) {
+            int end = registrationOrder.size() - 1 - page * size;
+            for (int i = end; i >= 0 && i > end - size; i--) {
+                AgentSerialNumber sn = serialsByNumber.get(registrationOrder.get(i));
+                if (sn != null) out.add(sn);
+            }
+        }
+        return out;
+    }
+
+    /** Every registration, newest first. Use {@link #page} for anything user-facing. */
     public List<AgentSerialNumber> listAll() {
-        return serialsByNumber.values().stream()
-            .sorted(Comparator.comparing(AgentSerialNumber::firstSeen).reversed())
-            .toList();
+        return page(0, Math.max(1, totalRegistered()));
     }
 
+    /** Constant-time counters; safe to call on every request at any registry size. */
     public Map<String, Object> getStats() {
-        long active = serialsByNumber.values().stream().filter(AgentSerialNumber::isActive).count();
-        long suspended = serialsByNumber.values().stream()
-            .filter(s -> s.status() == AgentSerialNumber.SerializationStatus.SUSPENDED).count();
-        long revoked = serialsByNumber.values().stream()
-            .filter(s -> s.status() == AgentSerialNumber.SerializationStatus.REVOKED).count();
         return Map.of(
-            "totalRegistered", serialsByNumber.size(),
-            "active", active, "suspended", suspended, "revoked", revoked,
-            "promptersTracked", prompters.size(),
-            "ownershipRecords", ownershipRecords.size());
+            "totalRegistered", (long) registrationOrder.size(),
+            "active", statusCounts.get(AgentSerialNumber.SerializationStatus.ACTIVE).get(),
+            "suspended", statusCounts.get(AgentSerialNumber.SerializationStatus.SUSPENDED).get(),
+            "revoked", statusCounts.get(AgentSerialNumber.SerializationStatus.REVOKED).get(),
+            "promptersTracked", (long) prompters.size(),
+            "ownershipRecords", (long) ownershipRecords.size());
     }
 
-    private long nextSequence(String category) {
-        return switch (category.toUpperCase()) {
-            case "MDL" -> modelSeq.incrementAndGet();
-            case "AGT" -> agentSeq.incrementAndGet();
-            case "SYS" -> systemSeq.incrementAndGet();
-            case "EMB" -> embeddedSeq.incrementAndGet();
-            default -> modelSeq.incrementAndGet();
-        };
+    // ── Indexing (shared by live writes and journal replay) ──────
+
+    private void indexAgent(AgentSerialNumber sn, String owner) {
+        serialsByHash.put(sn.fullHash(), sn);
+        serialsByNumber.put(sn.serialNumber(), sn);
+        agentOwners.put(sn.serialNumber(), owner);
+        ownerCounts.computeIfAbsent(owner, o -> new AtomicLong()).incrementAndGet();
+        registrationOrder.add(sn.serialNumber());
+        statusCounts.get(sn.status()).incrementAndGet();
+        sequences.get(sn.category()).accumulateAndGet(sn.sequenceNumber(), Math::max);
     }
 
-    private void sealToAuditChain(String eventType, Map<String, Object> payload) {
-        if (auditChainUrl == null || auditChainUrl.isBlank()) return;
+    private void applyStatus(AgentSerialNumber a, AgentSerialNumber.SerializationStatus status, Instant at) {
+        AgentSerialNumber updated = new AgentSerialNumber(
+            a.serialNumber(), a.fullHash(), a.category(), a.provider(), a.modelName(), a.modelVersion(),
+            a.spiffeId(), a.firstSeen(), at, a.sequenceNumber(), status, a.metadata());
+        serialsByNumber.put(a.serialNumber(), updated);
+        serialsByHash.put(a.fullHash(), updated);
+        statusCounts.get(a.status()).decrementAndGet();
+        statusCounts.get(status).incrementAndGet();
+    }
+
+    private void indexRecord(ActionOwnershipRecord record) {
+        ownershipRecords.put(record.recordHash(), record);
+        recordsByAgent.computeIfAbsent(record.agentSerial(), k -> Collections.synchronizedList(new ArrayList<>()))
+            .add(record.recordHash());
+        recordsByPrompter.computeIfAbsent(record.prompterHash(), k -> Collections.synchronizedList(new ArrayList<>()))
+            .add(record.recordHash());
+
+        PrompterIdentity p = prompters.get(record.prompterHash());
+        if (p != null) {
+            prompters.put(p.prompterHash(), new PrompterIdentity(
+                p.prompterHash(), p.organizationId(), p.authenticationType(), p.spiffeId(),
+                p.firstSeen(), record.timestamp(), p.actionCount() + 1, p.type(), p.metadata()));
+        }
+        AgentSerialNumber a = serialsByNumber.get(record.agentSerial());
+        if (a != null) {
+            AgentSerialNumber seen = new AgentSerialNumber(
+                a.serialNumber(), a.fullHash(), a.category(), a.provider(), a.modelName(), a.modelVersion(),
+                a.spiffeId(), a.firstSeen(), record.timestamp(), a.sequenceNumber(), a.status(), a.metadata());
+            serialsByNumber.put(a.serialNumber(), seen);
+            serialsByHash.put(a.fullHash(), seen);
+        }
+    }
+
+    // ── Journal ──────────────────────────────────────────────────
+
+    private void openJournal(Path dataDir) {
         try {
-            String json = "{\"verdict\":\"ALLOW\",\"modelId\":\"aigis-serialization\",\"vendorId\":\"aigis\","
-                + "\"inputHash\":\"" + sha256(eventType + payload) + "\","
-                + "\"outputHash\":\"" + sha256(payload.toString()) + "\","
-                + "\"metadata\":{\"eventType\":\"" + eventType + "\"}}";
+            Files.createDirectories(dataDir);
+            if (Files.exists(journal)) replay();
+            journalWriter = Files.newBufferedWriter(journal, StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            LOG.info("[AIGIS] Registry loaded from " + journal + ": " + totalRegistered() + " agents");
+        } catch (IOException e) {
+            throw new IllegalStateException("Cannot open AIGIS registry journal " + journal, e);
+        }
+    }
+
+    private void replay() throws IOException {
+        replaying = true;
+        long lineNo = 0;
+        try (var lines = Files.lines(journal, StandardCharsets.UTF_8)) {
+            for (Iterator<String> it = lines.iterator(); it.hasNext(); ) {
+                String line = it.next();
+                lineNo++;
+                if (line.isBlank()) continue;
+                try {
+                    replayLine(JSON.readTree(line));
+                } catch (Exception e) {
+                    // A torn final line after a crash is expected; anything else is worth a warning.
+                    LOG.warning("[AIGIS] Skipping unreadable journal line " + lineNo + ": " + e.getMessage());
+                }
+            }
+        } finally {
+            replaying = false;
+        }
+    }
+
+    private void replayLine(JsonNode n) throws IOException {
+        switch (n.path("t").asText()) {
+            case "agent" -> indexAgent(JSON.treeToValue(n.get("v"), AgentSerialNumber.class), n.path("owner").asText());
+            case "status" -> {
+                AgentSerialNumber a = serialsByNumber.get(n.path("serial").asText());
+                if (a != null) applyStatus(a, AgentSerialNumber.SerializationStatus.valueOf(n.path("status").asText()),
+                    Instant.parse(n.path("at").asText()));
+            }
+            case "prompter" -> {
+                PrompterIdentity p = JSON.treeToValue(n.get("v"), PrompterIdentity.class);
+                prompters.put(p.prompterHash(), p);
+                prompterOwners.putIfAbsent(p.prompterHash(), n.path("owner").asText());
+            }
+            case "aor" -> indexRecord(JSON.treeToValue(n.get("v"), ActionOwnershipRecord.class));
+            default -> LOG.warning("[AIGIS] Unknown journal entry type: " + n.path("t").asText());
+        }
+    }
+
+    private void journal(String type, Map<String, Object> fields) {
+        if (journalWriter == null || replaying) return;
+        try {
+            ObjectNode line = JSON.createObjectNode().put("t", type);
+            fields.forEach((k, v) -> line.set(k, JSON.valueToTree(v)));
+            journalWriter.write(JSON.writeValueAsString(line));
+            journalWriter.newLine();
+            journalWriter.flush();
+        } catch (IOException e) {
+            LOG.severe("[AIGIS] Failed to persist " + type + ": " + e.getMessage());
+        }
+    }
+
+    // ── Audit chain ──────────────────────────────────────────────
+
+    private void sealToAuditChain(String eventType, String serial, Map<String, Object> payload) {
+        if (auditChainUrl.isBlank() || replaying) return;
+        try {
+            String json = JSON.writeValueAsString(Map.of(
+                "verdict", "ALLOW",
+                "modelId", "aigis-serialization",
+                "vendorId", "aigis",
+                "inputHash", sha256(eventType + "|" + serial),
+                "outputHash", sha256(JSON.writeValueAsString(new TreeMap<>(payload))),
+                "metadata", Map.of("eventType", eventType, "serialNumber", serial)));
             http.sendAsync(
                 HttpRequest.newBuilder()
-                    .uri(URI.create(auditChainUrl + "/append"))
+                    .uri(URI.create(auditChainUrl + "/record"))
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(json))
                     .timeout(Duration.ofSeconds(5))
                     .build(),
-                HttpResponse.BodyHandlers.ofString()
-            ).exceptionally(ex -> { LOG.fine("[AI-GIS] Audit chain unreachable"); return null; });
+                HttpResponse.BodyHandlers.discarding()
+            ).exceptionally(ex -> { LOG.fine("[AIGIS] Audit chain unreachable"); return null; });
         } catch (Exception e) {
-            LOG.fine("[AI-GIS] Audit chain error: " + e.getMessage());
+            LOG.fine("[AIGIS] Audit chain error: " + e.getMessage());
         }
     }
 
@@ -242,6 +452,8 @@ public class AgentSerializationService {
         try {
             byte[] h = MessageDigest.getInstance("SHA-256").digest(input.getBytes(StandardCharsets.UTF_8));
             return HexFormat.of().formatHex(h);
-        } catch (Exception e) { return "hash-error"; }
+        } catch (Exception e) {
+            throw new IllegalStateException("SHA-256 unavailable", e);
+        }
     }
 }

@@ -1,259 +1,167 @@
 # AIGIS Protocol Specification
 
+**AIGIS: Serialization & Identification Protocol**
 **Version:** 1.0.0
-**Date:** October 29, 2026
-**Author:** Russell Lea Renison
+**Date:** November 3, 2026
+**Author:** Russell Lea Renison, KYMA Tech Solutions
 **License:** Apache License 2.0
+
+The key words MUST, MUST NOT, SHOULD and MAY are to be interpreted as described in RFC 2119.
+Sections 1–8 are normative and are implemented by the reference implementation in this
+repository. Section 9 is a non-normative roadmap.
 
 ---
 
 ## 1. Overview
 
-AIGIS (Agent Identity Governance and Identification Standard) defines a protocol for assigning, registering, verifying, and managing unique identities for AI agent instances. The protocol establishes a universal standard for agent accountability across the AI ecosystem.
+AIGIS assigns every AI model and agent a permanent serial number and records, for each action
+an agent takes, three accountable parties:
 
-## 2. Agent Serial Number Format
+1. **Agent**: the model or agent that acted, identified by its AIGIS serial number.
+2. **Prompter**: the human or system that instructed it, identified by a one-way hash.
+3. **Provider**: the organization that supplies or hosts the agent.
 
-### 2.1 Structure
+A registry stores serials, prompters and Action Ownership Records (AORs) and answers public
+lookups, so anyone can check who stands behind an agent and whether it is still active.
 
-```
-AIGIS-{PROVIDER_CODE}-{MODEL_HASH}-{INSTANCE_SEQ}-{TIMESTAMP}-{CHECKSUM}
-```
+## 2. Agent Serial Number
 
-| Field | Length | Description |
-|-------|--------|-------------|
-| `AIGIS` | 5 | Protocol identifier (fixed) |
-| `PROVIDER_CODE` | 2-8 | Registered provider abbreviation |
-| `MODEL_HASH` | 4 | First 4 hex chars of SHA-256 of model identifier |
-| `INSTANCE_SEQ` | 4 | Zero-padded sequential instance number |
-| `TIMESTAMP` | 18 | ISO 8601 compact UTC creation time (YYYYMMDDTHHmmssZ) |
-| `CHECKSUM` | 4 | First 4 hex chars of SHA-256 of preceding fields |
-
-### 2.2 Generation Rules
-
-1. Serial numbers are generated at agent instantiation time
-2. The provider code must be pre-registered with an AIGIS registry
-3. Instance sequence numbers are monotonically increasing per provider
-4. Timestamps use UTC exclusively
-5. The checksum is computed over the concatenation of all preceding fields (including hyphens)
-6. Serial numbers are immutable once assigned — they cannot be reused or reassigned
-
-### 2.3 Examples
+### 2.1 Format
 
 ```
-AIGIS-ANTH-7f3a-0001-20261029T050000Z-a4b2    (Anthropic Claude instance)
-AIGIS-OAI-3b2c-0142-20261029T120000Z-f7e1     (OpenAI GPT instance)
-AIGIS-META-9d4e-0007-20261029T080000Z-c3a9     (Meta Llama instance)
-AIGIS-CUST-1a2b-0001-20261029T090000Z-d5f3     (Custom/self-hosted instance)
+AIGIS-{CAT}-{HASH8}-{SEQ6}
+
+AIGIS-AGT-bc2b4ac4-000001
 ```
 
-## 3. Registration Protocol
+| Field | Description |
+|---|---|
+| `AIGIS` | Protocol identifier (fixed) |
+| `CAT` | Category: `MDL` foundation model, `AGT` autonomous agent, `SYS` multi-agent system, `EMB` embedded model |
+| `HASH8` | First 8 lowercase hex characters of the identity hash (2.2) |
+| `SEQ6` | Issue sequence within the category at this registry, zero-padded to 6 digits (wider if it overflows) |
 
-### 3.1 Agent Registration
+Regular expression: `^AIGIS-(MDL|AGT|SYS|EMB)-[0-9a-f]{8}-\d{6,}$`
 
-To register a new agent, a provider submits a registration request to an AIGIS registry.
-
-**Request:**
-```json
-POST /api/v1/agents/register
-Content-Type: application/json
-
-{
-  "model": {
-    "name": "claude-sonnet-5-5",
-    "version": "2026-10-01",
-    "provider": "anthropic"
-  },
-  "deployer": {
-    "id": "org-123456",
-    "name": "Acme Corp",
-    "contact": "ai-ops@acme.com"
-  },
-  "prompter": {
-    "id": "user-789",
-    "role": "operator",
-    "organization": "org-123456"
-  },
-  "mandate": {
-    "purpose": "customer-support-tier-1",
-    "capabilities": ["text-generation", "tool-use", "web-search"],
-    "restrictions": ["no-code-execution", "no-financial-transactions"],
-    "expiry": "2027-10-29T00:00:00Z"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "serial": "AIGIS-ANTH-7f3a-0001-20261029T050000Z-a4b2",
-  "status": "ACTIVE",
-  "registered_at": "2026-10-29T05:00:00Z",
-  "registry_url": "https://registry.aigis-protocol.org",
-  "certificate": {
-    "issuer": "AIGIS Registry Authority",
-    "valid_from": "2026-10-29T05:00:00Z",
-    "valid_until": "2027-10-29T00:00:00Z",
-    "fingerprint": "sha256:a1b2c3d4..."
-  }
-}
-```
-
-### 3.2 Registration Fields
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `model.name` | Yes | Model identifier |
-| `model.version` | Yes | Model version or release date |
-| `model.provider` | Yes | Model provider (Anthropic, OpenAI, Meta, etc.) |
-| `deployer.id` | Yes | Unique deployer organization ID |
-| `deployer.name` | Yes | Human-readable organization name |
-| `deployer.contact` | Yes | Contact for incident response |
-| `prompter.id` | Yes | Individual or system that instructed the agent |
-| `prompter.role` | Yes | Role classification (operator, developer, automated) |
-| `mandate.purpose` | Yes | Declared purpose of the agent |
-| `mandate.capabilities` | Yes | Permitted capability set |
-| `mandate.restrictions` | No | Explicit prohibitions |
-| `mandate.expiry` | No | Mandate expiration (default: 1 year) |
-
-## 4. Path Ledger
-
-### 4.1 Overview
-
-The path ledger is a doubly-chained, append-only record of an agent's operational checkpoints. Each entry links to both the previous and next entries via cryptographic hashes, providing tamper-evident provenance.
-
-### 4.2 Ledger Entry Schema
-
-```json
-{
-  "entry_id": "uuid-v4",
-  "serial": "AIGIS-ANTH-7f3a-0001-20261029T050000Z-a4b2",
-  "sequence": 42,
-  "timestamp": "2026-10-29T05:30:00Z",
-  "checkpoint_type": "ACTION | MANDATE_CHANGE | TRANSFER | SUSPENSION | REVOCATION",
-  "data": {
-    "action": "web-search",
-    "context": "customer-support-session-789",
-    "outcome": "completed"
-  },
-  "prev_hash": "sha256:...",
-  "curr_hash": "sha256:...",
-  "signature": "ed25519:..."
-}
-```
-
-### 4.3 Chain Integrity
-
-- **Forward chain:** Each entry's `curr_hash` includes the `prev_hash`, creating an append-only forward chain
-- **Backward chain:** Upon next entry creation, the previous entry's record is updated with a `next_hash` pointer
-- **Signatures:** Each entry is signed with the registry's Ed25519 key
-- **Verification:** Any party can verify chain integrity by walking forward or backward and validating hashes
-
-### 4.4 Checkpoint Types
-
-| Type | Description |
-|------|-------------|
-| `ACTION` | Agent performed a registered action |
-| `MANDATE_CHANGE` | Agent's mandate was narrowed (attenuation only — mandates can never widen) |
-| `TRANSFER` | Agent ownership transferred to a new operator |
-| `SUSPENSION` | Agent temporarily suspended |
-| `REVOCATION` | Agent permanently revoked |
-| `REACTIVATION` | Previously suspended agent reactivated |
-
-## 5. Ownership and Mandate Attenuation
-
-### 5.1 Ownership Records
-
-Every agent has exactly one owner at any point in time. Ownership transfers are recorded in the path ledger.
-
-```json
-{
-  "serial": "AIGIS-ANTH-7f3a-0001-20261029T050000Z-a4b2",
-  "current_owner": {
-    "id": "org-123456",
-    "since": "2026-10-29T05:00:00Z"
-  },
-  "ownership_history": [
-    {
-      "owner": "org-123456",
-      "from": "2026-10-29T05:00:00Z",
-      "to": null,
-      "transfer_reason": "CREATION"
-    }
-  ]
-}
-```
-
-### 5.2 Mandate Attenuation
-
-A core safety principle of AIGIS: **mandates can only narrow, never widen.**
-
-- An agent created with `["text-generation", "tool-use", "web-search"]` capabilities can have capabilities removed but never added
-- Restriction lists can grow but never shrink
-- This ensures that delegation through chains of agents always reduces privilege, never escalates it
-
-## 6. Verification API
-
-### 6.1 Verify Agent Identity
+### 2.2 Identity hash
 
 ```
-GET /api/v1/agents/verify/{serial}
+identityHash = SHA-256( norm(provider) | norm(modelName) | norm(modelVersion) | firstSeen )
 ```
 
-Returns the agent's current registration status, owner, and mandate.
+- `norm(x)` is `x` trimmed and lowercased; a missing `modelVersion` is `"unknown"`.
+- `firstSeen` is the registration instant in ISO-8601 UTC (`Instant.toString()` form).
+- `|` is a literal vertical bar. The hash is encoded as 64 lowercase hex characters.
 
-### 6.2 Query Path Ledger
+Because `firstSeen` is part of the hash, registering the same model twice yields two distinct
+serials. Anyone holding the four inputs can recompute the hash and confirm the serial was not
+altered (`integrityVerified` in lookups).
+
+### 2.3 Rules
+
+1. A serial is assigned once, at registration, and is never reused or reassigned.
+2. Sequences are monotonically increasing per category and MUST continue across restarts.
+3. A serial carries no personal data.
+
+## 3. Prompter Identity
 
 ```
-GET /api/v1/agents/{serial}/ledger?from={timestamp}&to={timestamp}
+prompterHash = SHA-256( norm(organizationId) | norm(authenticatedIdentity) | norm(authMethod) )
 ```
 
-Returns ledger entries for the specified time range.
+The registry stores only the hash, the organization ID, the authentication method and the
+prompter type (`HUMAN`, `SYSTEM`, `AGENT_UPSTREAM`, `API_CLIENT`, `SCHEDULED_TASK`). The hash is
+one-way: it cannot be reversed to reveal the identity, but the prompter can prove it by
+presenting the same inputs.
 
-### 6.3 Verify Chain Integrity
+## 4. Action Ownership Record (AOR)
 
-```
-GET /api/v1/agents/{serial}/ledger/verify
-```
+An AOR binds one action to the agent, prompter and provider:
 
-Walks the full chain and returns integrity status.
+| Field | Description |
+|---|---|
+| `agentSerial`, `agentFullHash` | The acting agent |
+| `prompterHash` | The instructing prompter |
+| `providerId` | The supplying provider |
+| `actionType`, `actionTarget`, `actionPayloadHash` | What was done, to what, and a hash of the payload |
+| `timestamp` | When (ISO-8601 UTC) |
+| `verdict` | Free-form outcome, default `PENDING` |
+| `recordHash` | `SHA-256(agentSerial|prompterHash|providerId|actionType|actionTarget|timestamp)` |
 
-### 6.4 HTTP Message Signatures (RFC 9421)
+A registry MUST refuse an AOR unless the agent is `ACTIVE` and both the agent and the prompter
+belong to the caller (Section 6). Anyone MAY verify an AOR by its `recordHash`; verification
+recomputes the hash from the stored fields.
 
-Agent requests to external services SHOULD include an HTTP message signature per RFC 9421, with the agent's serial number in the signature parameters. This allows receiving services to verify agent identity inline without a separate registry lookup.
+## 5. Status: suspension and revocation
 
-## 7. Revocation and Suspension
+| Status | Meaning |
+|---|---|
+| `ACTIVE` | The agent may be attached to new AORs. |
+| `SUSPENDED` | Temporarily inactive; new AORs are refused. |
+| `REVOKED` | Permanently inactive. Irreversible; the serial is never reassigned. |
 
-### 7.1 Suspension
+Status changes MUST be recorded with their time and MUST survive registry restarts.
 
-A suspended agent's serial remains valid but is marked inactive. Suspended agents MUST NOT be granted access to secured resources. Suspension is reversible.
+## 6. Ownership and access control
 
-### 7.2 Revocation
+- Every agent and prompter has exactly one owner: the credential that registered it.
+- Only the owner (or the registry administrator) may suspend or revoke an agent, attach AORs
+  to it, or read its action history.
+- A registry that fronts many users (for example a gateway issuing per-user API keys)
+  authenticates each user itself and forwards the user's identity to the registry. In the
+  reference implementation the gateway sends the registry's service key in `X-AIGIS-Key` and
+  the user's ID in `X-AIGIS-Owner`; the registry MUST ignore `X-AIGIS-Owner` from callers that
+  do not hold the service key. A call with the service key and no owner acts as administrator.
+- Registries SHOULD cap registrations per owner and rate-limit registration.
 
-A revoked agent's serial is permanently deactivated. Revocation is irreversible. The serial number is never reassigned.
+## 7. Registry API
 
-### 7.3 Lineage Revocation
+Base path `/api/v1/aigis`. All bodies are JSON.
 
-When an agent that has spawned child agents is revoked, all child agents in its lineage tree are automatically suspended pending review. This prevents orphaned agents from continuing to operate under a revoked parent's authority.
+| Method | Path | Access | Result |
+|---|---|---|---|
+| GET | `/protocol` | public | Protocol summary |
+| GET | `/registry?page=0&size=25` | public | Registry page, newest first; `size` 1–100 |
+| GET | `/lookup/{serial}` | public | Agent, with `integrityVerified` |
+| GET | `/lookup/hash/{identityHash}` | public | Agent |
+| GET | `/verify/{recordHash}` | public | 200 if the AOR exists and verifies, else 404 |
+| GET | `/stats` | public | Counts of agents by status, prompters and AORs |
+| POST | `/register` | credential | `{provider*, modelName*, modelVersion, category (MDL\|AGT\|SYS\|EMB), spiffeId}` → 201 agent; 429 at the owner's limit |
+| POST | `/prompter` | credential | `{organizationId*, authenticatedIdentity, authMethod, type, spiffeId}` → 201 |
+| POST | `/ownership` | owner | `{agentSerial*, prompterHash*, providerId*, actionType*, actionTarget, actionPayloadHash, verdict}` → 201 AOR, or 403 |
+| GET | `/history/agent/{serial}` | owner | Up to 100 most recent AORs |
+| GET | `/history/prompter/{hash}` | owner | Up to 100 most recent AORs |
+| POST | `/suspend/{serial}` | owner | 200, 403 or 404 |
+| POST | `/revoke/{serial}` | owner | 200, 403 or 404 |
 
-## 8. Federation
+`*` = required. Text fields are limited to 200 characters. Unknown categories are rejected with 400.
 
-AIGIS registries can federate, allowing multiple registry operators while maintaining a unified namespace. Federation details will be specified in a future version of this document.
+## 8. Durability and audit
 
-## 9. Security Considerations
+- A conforming registry MUST persist agents, status changes, prompters and AORs so that a
+  restart loses nothing. The reference implementation appends every change to a JSON-lines
+  journal and replays it on startup.
+- A registry MAY additionally forward each event to an external tamper-evident audit chain.
+  The reference implementation does so when `AUDIT_CHAIN_URL` is set, POSTing to
+  `{AUDIT_CHAIN_URL}/record`.
+- Deployments MUST serve the API over TLS.
 
-- All registry communications MUST use TLS 1.3+
-- Ed25519 signatures on all ledger entries
-- Serial numbers contain no personally identifiable information
-- Registry access controls are provider-configurable
-- Rate limiting on registration and verification endpoints
+## 9. Roadmap (non-normative)
+
+Planned for future versions, subject to change through the protocol-change process in
+[CONTRIBUTING.md](CONTRIBUTING.md):
+
+- **Path ledger:** an append-only, hash-chained record of each agent's checkpoints (actions,
+  mandate changes, transfers, status changes), with registry signatures on each entry.
+- **Mandates and attenuation:** a declared purpose and capability set per agent that can only
+  narrow over time, never widen.
+- **Ownership transfer** recorded in the ledger.
+- **Lineage:** parent/child relationships between agents, with suspension of a revoked
+  agent's descendants pending review.
+- **RFC 9421 HTTP Message Signatures** carrying the agent's serial, so services can verify an
+  agent inline.
+- **Federation** between independently operated registries under one namespace.
 
 ## 10. Conformance
 
-An implementation conforms to AIGIS if it:
-
-1. Generates serial numbers according to Section 2
-2. Implements the registration protocol per Section 3
-3. Maintains a path ledger per Section 4
-4. Enforces mandate attenuation per Section 5.2
-5. Provides verification endpoints per Section 6
-6. Implements revocation and suspension per Section 7
+An implementation conforms to AIGIS 1.0 if it implements Sections 2 through 8.

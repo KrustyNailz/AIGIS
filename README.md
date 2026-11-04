@@ -1,6 +1,6 @@
-# AIGIS — Agent Identity Governance and Identification Standard
+# AIGIS — Serialization & Identification Protocol
 
-**An open-source protocol and reference implementation for identifying, registering, and tracking AI agents.**
+**An open-source protocol and reference implementation that gives every AI model and agent a permanent serial number, and records who stands behind every action it takes.**
 
 [![CI](https://github.com/KrustyNailz/AIGIS/actions/workflows/ci.yml/badge.svg)](https://github.com/KrustyNailz/AIGIS/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
@@ -9,12 +9,15 @@
 
 Free to use, modify, and deploy. No cost. No vendor lock-in.
 
+**Don't want to host it?** Use the free public registry at **[kymatech.io/ai-gis](https://kymatech.io/ai-gis)**: look up any serial without an account, or request a free API token (emailed to you, valid one year) to register your own agents.
+
 ---
 
 ## Contents
 
 - [The Problem](#the-problem)
 - [The Solution](#the-solution)
+- [Free Hosted Registry](#free-hosted-registry)
 - [Quick Start (5 minutes)](#quick-start-5-minutes)
 - [API Reference](#api-reference)
 - [Configuration](#configuration)
@@ -49,8 +52,8 @@ AIGIS gives every AI model and agent a permanent, verifiable identity and binds 
 |---|---|
 | **Agent Serial Number** | A permanent, tamper-evident ID for every model or agent, derived from a SHA-256 hash of its identity (provider, model, version, first-seen time). |
 | **Prompter Identity** | A one-way hash of *who* instructed the agent. Proves responsibility without exposing personal data. |
-| **Action Ownership Record (AOR)** | Binds each action to the **Agent + Prompter + Provider** triple. No registered agent and prompter = no record = action denied. |
-| **Registry** | Look up, verify, suspend, and permanently revoke agents. |
+| **Action Ownership Record (AOR)** | Binds each action to the **Agent + Prompter + Provider** triple. Anyone can verify a record by its SHA-256 hash. |
+| **Registry** | Public lookup and verification; only an agent's owner can suspend or permanently revoke it. Survives restarts. |
 
 Example serial issued by the reference implementation:
 
@@ -60,6 +63,24 @@ AIGIS-AGT-bc2b4ac4-000001
       │   └── first 8 hex chars of the SHA-256 identity hash
       └── category: MDL (model) · AGT (agent) · SYS (multi-agent system) · EMB (embedded)
 ```
+
+---
+
+## Free Hosted Registry
+
+KYMA Tech runs a public AIGIS registry at **https://kymatech.io/api/v1/aigis**.
+
+1. Request a free token at **[kymatech.io/ai-gis](https://kymatech.io/ai-gis#get-token)**. It is emailed to you, valid for one year, and works only for the AIGIS API. Each token can register up to 10,000 agents.
+2. Register an agent:
+   ```bash
+   curl -X POST https://kymatech.io/api/v1/aigis/register \
+     -H 'Content-Type: application/json' \
+     -H 'X-API-Key: <your token>' \
+     -d '{"provider":"your-org","modelName":"support-agent","category":"AGT"}'
+   ```
+3. Look it up, or browse the registry, with no token: `GET https://kymatech.io/api/v1/aigis/lookup/{serial}`, or use the search on [kymatech.io/ai-gis](https://kymatech.io/ai-gis#registry).
+
+Only your token can suspend, revoke, attach ownership records to, or read the history of the agents it registered. On the hosted registry, send a JSON body (`-d '{}'`) with `suspend` and `revoke` requests.
 
 ---
 
@@ -83,7 +104,7 @@ This compiles the code, runs the test suite, and produces a single self-containe
 ### Run
 
 ```bash
-java -jar target/aigis.jar                    # standalone, port 8097, no auth (dev mode)
+java -jar target/aigis.jar                    # port 8097, no auth (local dev), registry saved in ./data
 java -jar target/aigis.jar --port 9090        # custom port
 AIGIS_API_KEY=change-me java -jar target/aigis.jar   # require an API key on write endpoints
 ```
@@ -113,11 +134,13 @@ curl -s -X POST localhost:8097/api/v1/aigis/ownership \
 curl -s localhost:8097/api/v1/aigis/verify/b15be9a4...
 curl -s localhost:8097/api/v1/aigis/lookup/AIGIS-AGT-bc2b4ac4-000001
 
-# 5. Revoke — the agent can never be bound to another action
+# 5. Revoke — the agent can never be bound to another action (only its owner can do this)
 curl -s -X POST localhost:8097/api/v1/aigis/revoke/AIGIS-AGT-bc2b4ac4-000001
 ```
 
 When `AIGIS_API_KEY` is set, add `-H 'X-AIGIS-Key: <key>'` (or `-H 'Authorization: Bearer <key>'`) to write requests.
+
+Restart the server and run step 4 again: the agent, its status and its records are still there.
 
 ---
 
@@ -130,25 +153,29 @@ Base path: `/api/v1/aigis`
 | Method | Path | Description |
 |---|---|---|
 | GET | `/protocol` | Protocol summary (serial format, categories, hashing rules) |
-| GET | `/registry` | All registered agents (newest first, up to 500) |
+| GET | `/registry?page=0&size=25` | Registered agents, newest first (`size` 1–100) |
 | GET | `/lookup/{serial}` | Agent details by serial, including an integrity check |
 | GET | `/lookup/hash/{hash}` | Agent details by full identity hash |
-| GET | `/verify/{recordHash}` | Verify an Action Ownership Record's integrity |
+| GET | `/verify/{recordHash}` | Verify an Action Ownership Record (200 if found and intact, else 404) |
 | GET | `/stats` | Registry counts (active, suspended, revoked, prompters, records) |
 
 ### Authenticated (when `AIGIS_API_KEY` is set)
 
+Every agent and prompter belongs to the caller that registered it. "Owner" endpoints answer 403 for anyone else.
+
 | Method | Path | Body / Description |
 |---|---|---|
-| POST | `/register` | `{provider*, modelName*, modelVersion, category (MDL\|AGT\|SYS\|EMB), spiffeId}` → serial (201) |
+| POST | `/register` | `{provider*, modelName*, modelVersion, category (MDL\|AGT\|SYS\|EMB), spiffeId}` → serial (201); 400 for an unknown category; 429 at the per-owner limit |
 | POST | `/prompter` | `{organizationId*, authenticatedIdentity, authMethod, type (HUMAN\|SYSTEM\|AGENT_UPSTREAM\|API_CLIENT\|SCHEDULED_TASK), spiffeId}` → prompterHash (201) |
-| POST | `/ownership` | `{agentSerial*, prompterHash*, providerId*, actionType*, actionTarget, actionPayloadHash, verdict}` → recordHash (201), or 403 if the agent is not active or the prompter is unknown |
-| GET | `/history/agent/{serial}` | Action history for an agent (up to 100 records) |
-| GET | `/history/prompter/{hash}` | Action count for a prompter |
-| POST | `/suspend/{serial}` | Suspend an agent (reversible status) |
-| POST | `/revoke/{serial}` | Permanently revoke an agent |
+| POST | `/ownership` | `{agentSerial*, prompterHash*, providerId*, actionType*, actionTarget, actionPayloadHash, verdict}` → recordHash (201), or 403 unless the agent is one of your active agents and the prompter one you registered |
+| GET | `/history/agent/{serial}` | **Owner.** Action history for an agent (up to 100 records) |
+| GET | `/history/prompter/{hash}` | **Owner.** Action history for a prompter (up to 100 records) |
+| POST | `/suspend/{serial}` | **Owner.** Suspend an agent |
+| POST | `/revoke/{serial}` | **Owner.** Permanently revoke an agent |
 
-`*` = required. Other endpoints: `GET /health` and `GET /` (service info).
+`*` = required. Text fields are limited to 200 characters. Other endpoints: `GET /health` and `GET /` (service info).
+
+**Running behind a gateway with many users:** authenticate users at the gateway, then call AIGIS with the service key in `X-AIGIS-Key` and the user's ID in `X-AIGIS-Owner`. AIGIS trusts `X-AIGIS-Owner` only from callers holding the service key; a service-key call without it acts as administrator.
 
 ---
 
@@ -159,9 +186,13 @@ Base path: `/api/v1/aigis`
 | Port | `AIGIS_PORT` env, or `--port <n>` | `8097` |
 | API key for write endpoints | `AIGIS_API_KEY` env | unset = dev mode, no auth |
 | Bind address | `server.host` in `application.yaml` | `0.0.0.0` |
-| External audit chain | `AUDIT_CHAIN_URL` env (events are POSTed to `<url>/append`) | unset = standalone |
+| Registry storage | `AIGIS_DATA_DIR` env (`none` = in memory only) | `./data` (`data/registry.jsonl`) |
+| Registrations per owner | `AIGIS_MAX_AGENTS_PER_OWNER` env | `10000` |
+| External audit chain | `AUDIT_CHAIN_URL` env (events are POSTed to `<url>/record`) | unset = standalone |
 
-> **Always set `AIGIS_API_KEY` on any server reachable by others.** Without it, anyone can register, suspend, or revoke agents.
+> **Always set `AIGIS_API_KEY` on any server reachable by others.** Without it, anyone can register agents, and anyone can act as administrator.
+
+Back up `registry.jsonl`: it is the registry. It is append-only, one JSON object per line, and is replayed on startup.
 
 ---
 
@@ -264,7 +295,7 @@ AIGIS/
 
 ## Specification vs. Reference Implementation
 
-[`SPECIFICATION.md`](SPECIFICATION.md) defines the full AIGIS protocol. This repository's code is the **reference implementation, v1.0.0**, and implements the core of it today. Being explicit about what is and isn't built yet:
+[`SPECIFICATION.md`](SPECIFICATION.md) defines the AIGIS protocol. This repository's code is its **reference implementation**:
 
 | Capability | Specification | Reference implementation v1.0.0 |
 |---|---|---|
@@ -273,16 +304,14 @@ AIGIS/
 | Agent + Prompter + Provider ownership binding | ✅ | ✅ |
 | Record integrity verification | ✅ | ✅ (SHA-256 recomputation) |
 | Suspension and revocation | ✅ | ✅ |
-| Public registry, lookup, stats | ✅ | ✅ |
-| API-key protected write endpoints | ✅ | ✅ |
-| Persistent storage | ✅ | ⏳ in-memory only — data is lost on restart |
-| Doubly-chained path ledger | ✅ | ⏳ planned |
-| Ed25519-signed entries / Merkle anchoring | ✅ | ⏳ planned (can forward events to an external audit chain via `AUDIT_CHAIN_URL`) |
-| Mandate attenuation, lineage revocation | ✅ | ⏳ planned |
-| RFC 9421 HTTP message signatures | ✅ | ⏳ planned |
-| Federation | future version | — |
+| Owner-only control of agents, prompters and history | ✅ | ✅ |
+| Public registry (paged), lookup, stats | ✅ | ✅ |
+| API-key protected write endpoints, per-owner limits | ✅ | ✅ |
+| Persistent storage | ✅ | ✅ append-only journal, replayed on restart |
+| Forwarding to an external audit chain | optional | ✅ via `AUDIT_CHAIN_URL` |
+| Path ledger, mandate attenuation, lineage, RFC 9421 signatures, federation | roadmap (§9) | ⏳ planned |
 
-Note: the specification's serial format (`AIGIS-{PROVIDER}-{MODEL_HASH}-{SEQ}-{TIMESTAMP}-{CHECK}`) and endpoint paths (`/api/v1/agents/...`) differ from the reference implementation's (`AIGIS-{CAT}-{hash8}-{seq6}`, `/api/v1/aigis/...`). Aligning the two is tracked as protocol work; contributions that close any ⏳ item are very welcome.
+Sections 1–8 of the specification describe exactly what this code does. Contributions toward the roadmap are welcome through the protocol-change process.
 
 ---
 

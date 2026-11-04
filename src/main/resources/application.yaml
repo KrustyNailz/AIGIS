@@ -4,7 +4,9 @@ server:
 # AIGIS settings are read from environment variables by AigisApplication:
 #   AIGIS_PORT       — override the listen port (default 8097, or --port <n>)
 #   AIGIS_API_KEY    — API key for write endpoints. Unset = dev mode (no auth).
-#   AUDIT_CHAIN_URL  — external audit chain endpoint. Unset = standalone mode.
+#   AIGIS_DATA_DIR   — registry journal directory (default ./data; "none" = in memory only)
+#   AIGIS_MAX_AGENTS_PER_OWNER — registrations allowed per owner (default 10000)
+#   AUDIT_CHAIN_URL  — external audit chain base URL; events are POSTed to {url}/record.
 #
 # Do not use ${VAR:default} placeholders here: Helidon SE 4.1.6 does not resolve
 # them and passes the literal text through (which would silently become the API key).

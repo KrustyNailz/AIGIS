@@ -8,33 +8,24 @@ import io.helidon.webserver.http.HttpRouting;
 import io.kymatech.aigis.identity.AgentSerializationService;
 import io.kymatech.aigis.route.AigisRoutes;
 
+import java.nio.file.Path;
 import java.util.logging.Logger;
 
 /**
- * AI-GIS — Agent Identity Governance & Identification Serialization
+ * AIGIS: Serialization &amp; Identification Protocol, reference implementation.
  *
- * Standalone open-source application for deterministic, tamper-evident identity
- * and accountability of AI models and autonomous agents.
+ * Gives every AI model and agent a permanent serial number and records which agent,
+ * prompter and provider stand behind each action. Runs as a single self-contained jar.
  *
- * Runs independently or integrates with the ICOSA platform for full governance
- * enforcement (Betelgeuse policy engine, Rigel audit chain, SPIFFE/SPIRE mTLS).
+ * Configuration (environment variables; all optional):
+ *   AIGIS_PORT                  listen port (default 8097; also --port N)
+ *   AIGIS_API_KEY               key required for write endpoints (unset = open, local dev only)
+ *   AIGIS_DATA_DIR              registry journal directory (default ./data; "none" = in memory)
+ *   AIGIS_MAX_AGENTS_PER_OWNER  registrations allowed per owner (default 10000)
+ *   AUDIT_CHAIN_URL             optional audit chain base URL; events are POSTed to {url}/record
  *
- * Modes:
- *   STANDALONE — Self-contained identity registry with local audit log.
- *                No ICOSA dependency. Ships as a single JAR.
- *   INTEGRATED — Connected to ICOSA's Rigel audit chain and Betelgeuse
- *                governance layer. AORs are sealed into the production chain.
- *
- * Codename: Black Reigns
- * Patent Pending: U.S. Provisional App. No. 64/186,696
- * Open Source — the AI-GIS serialization protocol is offered freely for global adoption.
- * Reference Implementation by Kymatech, Inc.
- *
- * Usage:
- *   java -jar aigis.jar                          # standalone, port 8097
- *   java -jar aigis.jar --port 9090              # custom port
- *   AIGIS_API_KEY=secret java -jar aigis.jar     # with auth
- *   AUDIT_CHAIN_URL=http://rigel:8095/api/v1/audit java -jar aigis.jar  # ICOSA integration
+ * Published by KYMA Tech Solutions (kymatech.io) under the Apache License 2.0.
+ * Patent pending: U.S. Provisional App. No. 64/186,696.
  */
 public class AigisApplication {
     private static final Logger LOG = Logger.getLogger(AigisApplication.class.getName());
@@ -43,35 +34,26 @@ public class AigisApplication {
     public static void main(String[] args) {
         Config config = Config.create();
         int port = config.get("server.port").asInt().orElse(DEFAULT_PORT);
-
-        // CLI override
         for (int i = 0; i < args.length - 1; i++) {
-            if ("--port".equals(args[i])) {
-                port = Integer.parseInt(args[i + 1]);
-            }
+            if ("--port".equals(args[i])) port = Integer.parseInt(args[i + 1]);
         }
+        String envPort = env("AIGIS_PORT");
+        if (!envPort.isBlank()) port = Integer.parseInt(envPort);
 
-        // Env var override
-        String envPort = System.getenv("AIGIS_PORT");
-        if (envPort != null && !envPort.isBlank()) {
-            port = Integer.parseInt(envPort);
-        }
+        // Read from the environment only: Helidon 4.1.6 does not resolve ${VAR:} placeholders in YAML.
+        String auditChainUrl = env("AUDIT_CHAIN_URL");
+        String apiKey = env("AIGIS_API_KEY");
+        String dataDir = env("AIGIS_DATA_DIR");
+        if (dataDir.isBlank()) dataDir = "data";
+        String maxPerOwner = env("AIGIS_MAX_AGENTS_PER_OWNER");
 
-        // Audit chain URL (optional — ICOSA integration)
-        String auditChainUrl = config.get("aigis.audit-chain-url").asString().orElse("");
-        String envAuditUrl = System.getenv("AUDIT_CHAIN_URL");
-        if (envAuditUrl != null && !envAuditUrl.isBlank()) auditChainUrl = envAuditUrl;
-
-        // API key (optional — standalone dev mode runs without auth)
-        String apiKey = config.get("aigis.api-key").asString().orElse("");
-        String envApiKey = System.getenv("AIGIS_API_KEY");
-        if (envApiKey != null && !envApiKey.isBlank()) apiKey = envApiKey;
-
+        AgentSerializationService service = new AgentSerializationService(
+            auditChainUrl,
+            "none".equalsIgnoreCase(dataDir) ? null : Path.of(dataDir),
+            maxPerOwner.isBlank() ? 10_000 : Integer.parseInt(maxPerOwner));
         String mode = auditChainUrl.isBlank() ? "STANDALONE" : "INTEGRATED";
 
-        AgentSerializationService service = new AgentSerializationService(auditChainUrl);
-
-        // CORS — open for standalone (it's an open protocol), tightened per deployment
+        // Open CORS: the protocol is public; writes still require the API key.
         CorsSupport cors = CorsSupport.builder()
             .addCrossOrigin(CrossOriginConfig.builder()
                 .allowOrigins("*")
@@ -86,15 +68,13 @@ public class AigisApplication {
             .get("/health", (req, res) -> res.send(
                 "{\"status\":\"UP\",\"service\":\"aigis\",\"mode\":\"" + mode + "\"}"))
             .get("/", (req, res) -> res.send(
-                "{\"service\":\"AI-GIS: Agent Identity Governance & Identification Serialization\","
+                "{\"service\":\"AIGIS: Serialization & Identification Protocol\","
                 + "\"version\":\"1.0.0\","
-                + "\"codename\":\"Black Reigns\","
                 + "\"mode\":\"" + mode + "\","
                 + "\"protocol\":\"/api/v1/aigis/protocol\","
                 + "\"registry\":\"/api/v1/aigis/registry\","
-                + "\"openSource\":true,"
-                + "\"patent\":\"U.S. Provisional App. No. 64/186,696\","
-                + "\"referenceImplementation\":\"ICOSA Platform by Kymatech, Inc.\"}"));
+                + "\"license\":\"Apache-2.0\","
+                + "\"source\":\"https://github.com/KrustyNailz/AIGIS\"}"));
 
         WebServer server = WebServer.builder()
             .host(config.get("server.host").asString().orElse("0.0.0.0"))
@@ -103,22 +83,22 @@ public class AigisApplication {
             .build()
             .start();
 
-        LOG.info("╔═══════════════════════════════════════════════════════════╗");
-        LOG.info("║  AI-GIS: Agent Identity Governance & ID Serialization    ║");
-        LOG.info("║  Codename: Black Reigns                                  ║");
-        LOG.info("║  Open Source Protocol — Reference Implementation         ║");
-        LOG.info("╠═══════════════════════════════════════════════════════════╣");
-        LOG.info("║  Port:       " + String.format("%-44s", server.port()) + "║");
-        LOG.info("║  Mode:       " + String.format("%-44s", mode) + "║");
-        LOG.info("║  Auth:       " + String.format("%-44s", (apiKey.isBlank() ? "DISABLED (dev)" : "ENABLED")) + "║");
-        LOG.info("║  Audit Chain:" + String.format("%-44s", (auditChainUrl.isBlank() ? "LOCAL ONLY" : auditChainUrl)) + "║");
-        LOG.info("║  Protocol:   /api/v1/aigis/protocol                      ║");
-        LOG.info("║  Registry:   /api/v1/aigis/registry                      ║");
-        LOG.info("╚═══════════════════════════════════════════════════════════╝");
+        LOG.info("AIGIS: Serialization & Identification Protocol");
+        LOG.info("  Port:        " + server.port());
+        LOG.info("  Mode:        " + mode);
+        LOG.info("  Auth:        " + (apiKey.isBlank() ? "DISABLED (local dev only)" : "ENABLED"));
+        LOG.info("  Registry:    " + (service.isPersistent() ? Path.of(dataDir).toAbsolutePath() : "in memory")
+            + " (" + service.totalRegistered() + " agents)");
+        LOG.info("  Audit chain: " + (auditChainUrl.isBlank() ? "not configured" : auditChainUrl));
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            LOG.info("[AI-GIS] shutting down");
+            LOG.info("[AIGIS] shutting down");
             server.stop();
         }));
+    }
+
+    private static String env(String name) {
+        String v = System.getenv(name);
+        return v == null ? "" : v.trim();
     }
 }
